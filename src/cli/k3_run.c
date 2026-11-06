@@ -76,6 +76,7 @@
 #include "k3_cancel.h" /* first Ctrl-C stops at a safe point; see the header */
 #include "k3_state.h" /* --save-state / --load-state file format */
 #include "k3_sysmem.h" /* available/total memory on Linux, Darwin and Windows */
+#include "k3_budget.h" /* --preset auto, including the 8 GB ultra fallback */
 
 static double now_s(void)
 {
@@ -215,8 +216,8 @@ static int spec_draft(const int *seq, int T, int cap, int *out)
  * the check refused anything above 95%, and auto's flat 2 GB margin cannot cover that 3%
  * gap once the machine is large. The effect was that auto always refused inside its own
  * full-residency branch -- the case that branch calls "the configuration auto exists
- * for" -- because entering it needs ~122 GB available, and by then 3% is over 3.7 GB. */
-#define K3_MEM_ADMIT 0.95
+ * for" -- because entering it needs ~122 GB available, and by then 3% is over 3.7 GB.
+ * The number itself is K3_MEM_ADMIT in k3_budget.h, shared with the planner. */
 
 #ifdef _OPENMP
 /* Physical cores, or 0 when the topology cannot be read.
@@ -269,7 +270,8 @@ static void usage(FILE *f)
 "memory:\n"
 "  --preset NAME         auto | ultra | laptop | desktop | workstation | server | max\n"
 "                        auto sizes both budgets from this machine's free RAM,\n"
-"                        trunk-first; also spelled --trunk-gb auto\n"
+"                        trunk-first. Below the ordinary floor it selects ultra,\n"
+"                        which is what fits in 8 GB. Also spelled --trunk-gb auto\n"
 "  --list-presets        show each preset's split and expected speed\n"
 "  --trunk DIR           packed trunk directory; enables streaming (see scripts/)\n"
 "  --trunk-gb X          trunk ring / pinned-layer budget\n"
@@ -1106,51 +1108,38 @@ int main(int argc, char **argv)
      * after the whole 110 GB trunk would be resident. */
     if (budget_auto) {
         const double avail = k3_mem_available_bytes();
-        if (avail <= 0.0) {
-            fprintf(stderr, "--preset auto could not read this machine's available memory; "
-                            "pass explicit --trunk-gb/--cache-gb\n");
+        K3AutoPlan plan;
+        if (avail <= 0.0 || !k3_budget_auto(avail, k3_mem_total_bytes(), &plan)) {
+            if (avail <= 0.0)
+                fprintf(stderr, "--preset auto could not read this machine's available memory; "
+                                "pass explicit --trunk-gb/--cache-gb\n");
+            else
+                fprintf(stderr, "auto: %.1f GB available cannot admit the ultra plan "
+                                "(%.1f GB). Pass explicit budgets, or use a larger machine.\n",
+                        avail / 1e9, (double)K3_ULTRA_FLOOR_GB);
             return 2;
         }
-        /* Fixed costs outside both budgets: embeddings + lm_head 4.70 GB, safetensors
-         * index, recurrent state 0.63 GB, KV cache and scratch. Reserve them, plus the
-         * same headroom the admission check enforces, plus 2 GB for buffers and the KV
-         * cache, which are not known until the config is loaded further down. */
-        const double reserve = 2.0 + (1.0 - K3_MEM_ADMIT) * (avail / 1e9) + 4.70 + 1.70;
-        double usable = avail / 1e9 - reserve;
-        const double slot_min = 2.5;   /* one ring slot + headroom; refuse below */
-        const double cache_min = 0.5;  /* topk+1 expert slots is ~0.3 GB */
-        if (usable < slot_min + cache_min) {
-            fprintf(stderr, "auto: only %.1f GB usable after the %.1f GB reserve; "
-                            "below the %.1f GB floor. Pass explicit budgets.\n",
-                    usable, reserve, slot_min + cache_min);
-            return 2;
-        }
-        const double trunk_full = 111.0;   /* full packed trunk + widen headroom */
-        if (usable - cache_min >= trunk_full) {
-            /* Full residency: per-token trunk reads disappear entirely. This is the
-             * configuration auto exists for. */
-            trunk_gb = trunk_full;
-            cache_gb = usable - trunk_full;
+        trunk_gb = plan.trunk_gb;
+        cache_gb = plan.cache_gb;
+        if (plan.ultra) {
+            /* Resident embeddings are 4.70 GB, which does not fit in 8 GB.
+             * Ultra streams them from the packed trunk. Without --trunk the
+             * engine loads the whole trunk resident instead. */
+            if (!trunk_dir) {
+                fprintf(stderr, "--preset auto on this machine needs --trunk; resident "
+                                "embeddings do not fit, and ultra streams them from the "
+                                "packed trunk\n");
+                return 2;
+            }
+            ultra = 1;
+            printf("auto budget: %.1f GB available, ordinary reserve %.1f GB does not fit; "
+                   "using ultra (trunk %.2f GB / expert cache %.2f GB)\n",
+                   plan.avail_gb, plan.reserve_gb, trunk_gb, cache_gb);
         } else {
-            /* Partial pinning has WEAK returns and real hazards, both measured on the
-             * released checkpoint: pinning 51 of 109 GB ran 14% SLOWER than pinning
-             * nothing (48.2 vs 42.1 s/token) because peak RSS at ~90% of RAM put the
-             * kernel into reclaim and the device served the remaining tail of the
-             * packed trunk a third slower, while a moderate pin stayed neutral to
-             * mildly positive (40.1 s/token at 25 GB, device throughput unharmed).
-             * So below full residency, auto pins only while the whole process stays
-             * comfortably clear of the RAM ceiling. */
-            const double memtotal = k3_mem_total_bytes();
-            const double rss_ceiling = memtotal > 0.0 ? 0.55 * memtotal / 1e9
-                                                      : usable;   /* total unknown: keep old cap */
-            double cap = rss_ceiling - reserve - cache_min;
-            if (cap < slot_min) cap = slot_min;
-            trunk_gb = usable - cache_min;
-            if (trunk_gb > cap) trunk_gb = cap;
-            cache_gb = cache_min;
+            printf("auto budget: %.1f GB available, %.1f GB reserved -> trunk %.1f GB / "
+                   "expert cache %.1f GB\n",
+                   plan.avail_gb, plan.reserve_gb, trunk_gb, cache_gb);
         }
-        printf("auto budget: %.1f GB available, %.1f GB reserved -> trunk %.1f GB / "
-               "expert cache %.1f GB\n", avail / 1e9, reserve, trunk_gb, cache_gb);
     }
 
     /* fa is sized for the released 24 MLA layers with generous headroom; k3_cfg_load

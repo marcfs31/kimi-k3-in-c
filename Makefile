@@ -156,7 +156,7 @@ CHAT_SRC   := src/chat/k3_chat.c src/chat/k3_sampler.c
 CLI_BIN    := $(BIN)/k3
 
 # Tests that need no checkpoint. These run in CI on every push.
-UNIT_TESTS := test_ops test_cache test_st test_model_stream test_cfg test_tok test_chat test_sampler scale_test k3_model test_trunk test_st_faults test_sysmem test_prefix test_state test_cancel test_json
+UNIT_TESTS := test_ops test_cache test_st test_model_stream test_cfg test_tok test_chat test_sampler scale_test k3_model test_trunk test_st_faults test_sysmem test_budget test_prefix test_state test_cancel test_json
 # Tests that need real shards. Built and run by `make test-all` with SHARD_DIR set;
 # see the weights-test target below.
 WEIGHT_TESTS := test_expert test_real_layer
@@ -234,6 +234,10 @@ $(BIN)/test_prefix: tests/unit/test_prefix.c src/chat/k3_prefix.h | $(BIN)
 # The memory probe is one platform call per OS and nothing else; built the same way.
 $(BIN)/test_sysmem: tests/unit/test_sysmem.c src/cli/k3_sysmem.h | $(BIN)
 	$(CC) -O2 -std=gnu99 $(WARN) $(INCLUDES) -Isrc/cli $< -o $@
+# The auto-budget decision is a header of pure arithmetic. It must select ultra
+# at 8 GB and must not rewrite a machine that already cleared the ordinary floor.
+$(BIN)/test_budget: tests/unit/test_budget.c src/cli/k3_budget.h | $(BIN)
+	$(CC) -O2 -std=gnu99 $(WARN) $(INCLUDES) -Isrc/cli $< -o $@
 
 # Allocates at REAL model widths (a ~1.8 GB KDA layer), so it needs the optimised build
 # rather than the portable C99 one the tokenizer and config tests use.
@@ -306,7 +310,15 @@ test: $(CLI_BIN) $(TEST_BINS)
 	  $(PYTHON) tools/layers_to_shards.py $(FIXTURES)/partial_index_nomap.json --layers 1 >/dev/null 2>&1; \
 	  rc=$$?; test $$rc -eq 2 || { echo "  index without a weight_map returned $$rc, expected 2"; exit 1; }; \
 	  echo "  2 prefix maps exact, 5 malformed inputs refused with exit 2"; \
+	  $(PYTHON) tests/test_fit_layers.py; \
 	  fi
+	@echo "== script syntax =="; \
+	  if command -v bash >/dev/null 2>&1; then \
+	      bash -n scripts/download-model.sh && bash -n scripts/pack-trunk.sh \
+	          && bash -n scripts/setup-small-linux.sh && bash -n scripts/k3-doctor.sh \
+	          && echo "  4 scripts parse"; \
+	  else echo "  NOT RUN: no bash"; fi
+	@echo "== auto budget ==";      ./$(BIN)/test_budget
 	@echo "== op kernels ==";        ./$(BIN)/test_ops $(FIXTURES)/ops
 	@echo "== streaming cache ==";   ./$(BIN)/test_cache $(FIXTURES)/cache
 	@echo "== streaming cache, split reads =="; K3_EXPERT_CHUNK=4096 ./$(BIN)/test_cache $(FIXTURES)/cache

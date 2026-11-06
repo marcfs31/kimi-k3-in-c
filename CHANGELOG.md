@@ -5,8 +5,23 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Terminal-only Linux on an 8 GB, sub-1.7 TB disk.** `scripts/setup-small-linux.sh`
+  builds, runs the weightless tests, and with `--download` fetches the deepest
+  layer prefix that leaves 8 GiB free after the shards and the packed trunk.
+  `download-model.sh --fit` does the sizing from the Hub index and the published
+  shard sizes. `pack-trunk.sh` takes the layer count instead of always packing 93.
+  `k3-doctor.sh` recommends `--preset ultra` from 4 GB available up to the laptop
+  floor, and points a small disk at that script. A prefix is not the full model.
+
 ### Fixed
 
+- **`--preset auto` refused every machine under about 12 GB available.** The
+  ordinary reserve includes 4.70 GB of resident embeddings, so an 8 GB box was
+  told to pass explicit budgets even though `--preset ultra` fits. Auto now
+  selects ultra there. At and above the ordinary floor the trunk-first split is
+  unchanged.
 - **The trunk report counted a prefetched layer as a hit** whenever its read finished
   before the walk bound it. On a fully streamed run of the tiny checkpoint, every one of
   the 156 layer binds was a real read ("reads 156 against 156 the walk owes"), and the

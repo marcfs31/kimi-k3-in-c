@@ -159,6 +159,8 @@ target_sources(test_state PRIVATE src/cli/k3_state.c)
 target_include_directories(test_state PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/cli)
 k3_add_test(test_sysmem tests/unit/test_sysmem.c)
 target_include_directories(test_sysmem PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/cli)
+k3_add_test(test_budget tests/unit/test_budget.c)
+target_include_directories(test_budget PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/cli)
 target_link_libraries(test_chat PRIVATE k3_chat)
 k3_add_test(test_sampler tests/unit/test_sampler.c)
 target_link_libraries(test_sampler PRIVATE k3_chat)
@@ -183,6 +185,7 @@ set_tests_properties(cache_split_reads PROPERTIES ENVIRONMENT "K3_EXPERT_CHUNK=4
 add_test(NAME config     COMMAND test_cfg   fixture ${FIX}/ref_k3.json)
 add_test(NAME interrupt   COMMAND test_cancel)
 add_test(NAME memory_probe COMMAND test_sysmem)
+add_test(NAME auto_budget COMMAND test_budget)
 add_test(NAME scale      COMMAND scale_test)
 add_test(NAME trunk      COMMAND test_trunk)
 add_test(NAME oracle     COMMAND k3_model   ${FIX})
@@ -226,6 +229,8 @@ if(K3_PYTHON)
            COMMAND ${CMAKE_COMMAND} -DPYTHON=${K3_PYTHON}
                    -DFIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures
                    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_partial_shards.cmake)
+  add_test(NAME fit_layers
+           COMMAND ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fit_layers.py)
 endif()
 
 # The tokenizer test needs the released vocabulary, which is not in this repository.

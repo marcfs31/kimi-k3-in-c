@@ -28,16 +28,24 @@ case "$(uname -s)" in
 esac
 filesize() { stat $STAT_FMT "$1"; }
 
-DEST="${1:?usage: download-model.sh <dest_dir> [--layers N]}"
+DEST="${1:?usage: download-model.sh <dest_dir> [--layers N | --fit]}"
 LAYERS=""
+FIT=0
 if [ "${2:-}" != "" ]; then
+    if [ "${2:-}" = "--fit" ]; then
+        FIT=1
+        [ "${3:-}" = "" ] || {
+            echo "usage: download-model.sh <dest_dir> [--layers N | --fit]" >&2
+            exit 1
+        }
+    else
     [ "${2:-}" = "--layers" ] || {
-        echo "usage: download-model.sh <dest_dir> [--layers N]" >&2
+        echo "usage: download-model.sh <dest_dir> [--layers N | --fit]" >&2
         exit 1
     }
-    LAYERS="${3:?usage: download-model.sh <dest_dir> [--layers N]}"
+    LAYERS="${3:?usage: download-model.sh <dest_dir> [--layers N | --fit]}"
     [ "${4:-}" = "" ] || {
-        echo "usage: download-model.sh <dest_dir> [--layers N]" >&2
+        echo "usage: download-model.sh <dest_dir> [--layers N | --fit]" >&2
         exit 1
     }
     # atoi-style parsing turned "1junk" into 1 in the CLI once; refuse that shape
@@ -47,6 +55,7 @@ if [ "${2:-}" != "" ]; then
             echo "download-model.sh: --layers must be a positive integer, got '$LAYERS'." >&2
             exit 1 ;;
     esac
+    fi
 fi
 REPO="moonshotai/Kimi-K3"
 
@@ -119,6 +128,45 @@ case "$REVISION" in
 esac
 
 mkdir -p "$DEST"
+
+# --fit picks the deepest prefix that leaves the floor free after shards and
+# trunk, then re-enters this script as --layers N so the size checks stay in
+# one place. A 1.14 TB disk cannot hold 1.56 TB + 109 GB; guessing N fills it.
+if [ "$FIT" -eq 1 ]; then
+    echo "fitting a layer prefix to the free space on $DEST"
+    echo "  (fetching the 59 MB tensor index first)"
+    HF_XET_HIGH_PERFORMANCE="${HF_XET_HIGH_PERFORMANCE:-1}" \
+    hf download "$REPO" --revision "$REVISION" --local-dir "$DEST" --max-workers 16 \
+        --include "model.safetensors.index.json" \
+        --include "config.json" \
+        --include "tokenizer_config.json" \
+        --include "tiktoken.model"
+    [ -f "$DEST/model.safetensors.index.json" ] || {
+        echo "FAIL: model.safetensors.index.json did not download." >&2
+        exit 1
+    }
+    [ -f "$DEST/config.json" ] || {
+        echo "FAIL: config.json did not download; without it the engine refuses to start." >&2
+        exit 1
+    }
+    AVAIL=$(df -P -k "$DEST" | awk 'NR==2 {print $4 * 1024}')
+    FITTER="$(dirname "$0")/../tools/fit_layers.py"
+    set +e
+    FIT_OUT="$(python3 "$FITTER" "$DEST/model.safetensors.index.json" \
+        "$(dirname "$0")/shard_sizes.txt" --free "$AVAIL")"
+    FIT_RC=$?
+    set -e
+    printf '%s\n' "$FIT_OUT"
+    if [ "$FIT_RC" -ne 0 ]; then
+        echo "FAIL: no layer prefix fits in the free space on $DEST." >&2
+        exit 1
+    fi
+    N="$(printf '%s\n' "$FIT_OUT" | awk '/^layers /{print $2}')"
+    case "$N" in
+        ''|*[!0-9]*|0*) echo "FAIL: fitter returned no layer count." >&2; exit 1 ;;
+    esac
+    exec "$0" "$DEST" --layers "$N"
+fi
 
 # Partial mode: fetch only the shards a --layers N run binds. The shard set comes
 # from tools/layers_to_shards.py over the Hub's own tensor index, never from a
@@ -209,6 +257,7 @@ if [ -n "$LAYERS" ]; then
     echo "      ./bin/k3 $DEST --layers $LAYERS --ids ...   (or any M <= $LAYERS)"
     echo "  The engine prints the same warning on every such run. Full runs need the"
     echo "  whole 1.56 TB: re-run without --layers."
+    printf '%s\n' "$LAYERS" > "$DEST/.k3_layers"
     exit 0
 fi
 

@@ -2,6 +2,19 @@
 
 From nothing to generated text.
 
+On a terminal-only Linux machine with about 8 GB of RAM and a disk under 1.7 TB
+(the Dell OptiPlex 3050 class: i5-6500T, 8 GB, 1.14 TB), do not follow the full
+checkpoint steps below. Run:
+
+```bash
+./scripts/setup-small-linux.sh
+./scripts/setup-small-linux.sh --download "$HOME/k3model"
+```
+
+That builds, tests, and downloads the deepest layer prefix the disk can hold.
+A prefix runs. It is not the full 93-layer model. `scripts/k3-doctor.sh` names
+the preset for this machine (`ultra`).
+
 ## 1. Check the machine
 
 ```bash

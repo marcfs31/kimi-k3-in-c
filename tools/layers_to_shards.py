@@ -50,6 +50,46 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
+def decoder_depth(weight_map: dict) -> int:
+    """How many decoder layers the index contains. 0 when it has none."""
+    max_layer = -1
+    for name in weight_map:
+        m = LAYER_RE.match(name)
+        if m:
+            max_layer = max(max_layer, int(m.group(1)))
+    return max_layer + 1
+
+
+def required_shards(weight_map: dict, n_layers: int) -> set[str]:
+    """Shards holding layers 0..n_layers-1, plus every non-layer language_model tensor.
+
+    Vision tensors are not language_model tensors and stay out. Raises ValueError
+    when the request cannot be answered without guessing.
+    """
+    depth = decoder_depth(weight_map)
+    if depth < 1:
+        raise ValueError("no language_model.model.layers.* tensors")
+    if n_layers < 1 or n_layers > depth:
+        raise ValueError("--layers %d exceeds the %d layers in the index" % (n_layers, depth))
+    for key in (EMBED_KEY, HEAD_KEY):
+        if key not in weight_map:
+            raise ValueError("%s is absent; refusing to guess where it lives" % key)
+    # Every language_model tensor outside the decoder layers is bound on every run:
+    # the embedding and head, but also the final norm and the output AttnRes pair. In
+    # the released index they all happen to share shard 94; selecting them by name
+    # rather than by that coincidence keeps a re-sharded revision from producing a
+    # subset that downloads cleanly and then fails to load.
+    need: set[str] = set()
+    for name, shard in weight_map.items():
+        m = LAYER_RE.match(name)
+        if m:
+            if int(m.group(1)) < n_layers:
+                need.add(shard)
+        elif isinstance(name, str) and name.startswith("language_model."):
+            need.add(shard)
+    return need
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     try:
@@ -65,49 +105,11 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 2
-
-    max_layer = -1
-    for name in weight_map:
-        m = LAYER_RE.match(name)
-        if m:
-            max_layer = max(max_layer, int(m.group(1)))
-    if max_layer < 0:
-        print(
-            "layers_to_shards: no language_model.model.layers.* tensors in %s." % args.index,
-            file=sys.stderr,
-        )
+    try:
+        need = required_shards(weight_map, args.layers)
+    except ValueError as e:
+        print("layers_to_shards: %s (%s)." % (e, args.index), file=sys.stderr)
         return 2
-    if args.layers > max_layer + 1:
-        print(
-            "layers_to_shards: --layers %d exceeds the %d layers in %s."
-            % (args.layers, max_layer + 1, args.index),
-            file=sys.stderr,
-        )
-        return 2
-
-    for key in (EMBED_KEY, HEAD_KEY):
-        if key not in weight_map:
-            print(
-                "layers_to_shards: %s is absent from %s; refusing to guess where it lives."
-                % (key, args.index),
-                file=sys.stderr,
-            )
-            return 2
-
-    # Every language_model tensor outside the decoder layers is bound on every run:
-    # the embedding and head, but also the final norm and the output AttnRes pair. In
-    # the released index they all happen to share shard 94; selecting them by name
-    # rather than by that coincidence keeps a re-sharded revision from producing a
-    # subset that downloads cleanly and then fails to load. Vision tensors are not
-    # language_model tensors and stay out.
-    need: set[str] = set()
-    for name, shard in weight_map.items():
-        m = LAYER_RE.match(name)
-        if m:
-            if int(m.group(1)) < args.layers:
-                need.add(shard)
-        elif name.startswith("language_model."):
-            need.add(shard)
     # LF, not the platform's text-mode newline: download-model.sh reads these names with
     # `read -r`, and under Git Bash on Windows a CRLF leaves a carriage return on every
     # name, so no shard matches its published size and every one is refused.

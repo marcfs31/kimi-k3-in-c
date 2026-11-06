@@ -31,6 +31,7 @@ bad()  { printf '  %sFAIL%s  %s\n'   "$RED" "$RST" "$*"; FAILED=1; }
 hdr()  { printf '\n%s\n' "$*"; }
 
 FAILED=0
+SMALL_DISK=0
 MODEL_DIR="${1:-}"
 
 printf '%s\n' "Kimi K3, environment check"
@@ -79,6 +80,7 @@ if   [ "$AVAIL_GB" -ge 192 ]; then PRESET=server;      EXPECT="~6 s/token"
 elif [ "$AVAIL_GB" -ge  96 ]; then PRESET=workstation; EXPECT="~6-20 s/token"
 elif [ "$AVAIL_GB" -ge  32 ]; then PRESET=desktop;     EXPECT="~24 s/token"
 elif [ "$AVAIL_GB" -ge  10 ]; then PRESET=laptop;      EXPECT="~27 s/token"
+elif [ "$AVAIL_GB" -ge   4 ]; then PRESET=ultra;       EXPECT="minutes per token, disk-bound"
 else PRESET=""; fi
 
 if [ -n "$PRESET" ]; then
@@ -90,7 +92,7 @@ else
     # allocation in tests/unit/scale_test.c. Failing the whole check on this number told
     # people their machine was broken when the only thing they could not do was the one
     # thing that needs 1.56 TB of disk they also did not have.
-    warn "under 10 GB available, below the floor for running the checkpoint (~8.2 GB peak RSS)"
+    warn "under 4 GB available, below even --preset ultra (~3.5 GB admitted)"
     printf '  %s      the build and "make test" need no weights and work fine here%s\n' \
         "$DIM" "$RST"
 fi
@@ -103,7 +105,10 @@ if [ -d "$TARGET" ]; then
     ok "free space at $TARGET: ${AVAIL_DISK:-?} GB"
     # 1.56 TB checkpoint + ~109 GB packed trunk.
     if [ -n "${AVAIL_DISK:-}" ] && [ "$AVAIL_DISK" -lt 1700 ]; then
+        SMALL_DISK=1
         warn "the full checkpoint needs ~1.56 TB plus ~109 GB for the packed trunk"
+        printf '  %s      a layer prefix can still run; see scripts/setup-small-linux.sh%s\n' \
+            "$DIM" "$RST"
     fi
 
     printf '  %smeasuring sequential read (2 GB, this takes a moment)…%s\n' "$DIM" "$RST"
@@ -141,8 +146,11 @@ fi
 
 hdr "result"
 if [ "$FAILED" -eq 0 ]; then
-    if [ -n "$PRESET" ]; then
+    if [ -n "$PRESET" ] && [ "$SMALL_DISK" -eq 0 ]; then
         printf '  %sthis machine can run Kimi K3%s\n' "$GRN" "$RST"
+    elif [ -n "$PRESET" ]; then
+        printf '  %sthis machine can run a layer prefix, not the full checkpoint%s\n' \
+            "$YLW" "$RST"
     else
         printf '  %sthis machine can build and test the engine, but not run the checkpoint%s\n' \
             "$YLW" "$RST"
@@ -156,7 +164,15 @@ if [ "$FAILED" -eq 0 ]; then
     #            fully resident at ~110 GB, which is the opposite of the budget just
     #            recommended.
     # MODEL_DIR is substituted when one was given, so the line can be pasted verbatim.
-    if [ -n "$PRESET" ]; then
+    if [ -n "$PRESET" ] && [ "$SMALL_DISK" -eq 1 ]; then
+        printf '\n  next (terminal, no desktop required):\n'
+        printf '    %s./scripts/setup-small-linux.sh%s\n' "$DIM" "$RST"
+        printf '    %s./scripts/setup-small-linux.sh --download ~/k3model%s\n' "$DIM" "$RST"
+        printf '  %sThat builds, tests, and fetches the deepest prefix this disk can hold.%s\n' \
+            "$DIM" "$RST"
+        printf '  %sRun it with --preset %s. A prefix is not the full model.%s\n' \
+            "$DIM" "$PRESET" "$RST"
+    elif [ -n "$PRESET" ]; then
         M="${MODEL_DIR:-<model_dir>}"
         printf '\n  next:\n'
         printf '    %smake -j%s\n' "$DIM" "$RST"
